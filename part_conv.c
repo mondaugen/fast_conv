@@ -1,6 +1,13 @@
 /* Routines for partition convolutions */
 
 #include <stdio.h> 
+#include <stdlib.h> 
+#include <math.h> 
+#include <string.h> 
+#include <time.h> 
+#include <limits.h> 
+#include <assert.h> 
+#include <valgrind/callgrind.h> 
 
 #ifdef FFT_LIB_FFTW
 
@@ -10,17 +17,22 @@
 #define FFTW_MALLOC(n) (fftw_complex*)fftw_malloc((n)*sizeof(fftw_complex))
 #define FFTW_FREE_(x) if (x) { fftw_free(x); x = NULL; } 
 
+typedef fftw_complex c64_t;
+
 #endif  
+
+typedef double f64_t;
 
 #define FREE_(x)      if (x) { free(x); x = NULL; } 
 #define CALLOC(t,n) (t*)calloc(sizeof(t),n) 
-#define CONT_IF_NULL(x,flg) if (!x) { flg = 1; continue }
-#define BRK_IF_NULL(x,flg,cond) if (!x) { cond; flg = 1; continue }
+#define CONT_IF_NULL(x,flg) if (!x) { flg = 1; continue; }
+#define BRK_IF_NULL(x,flg,cond) if (!x) { cond; flg = 1; continue; }
+#define RAND_C64() (((c64_t)random())/LONG_MAX * 2. - 1.)
 
 static inline void *MCHK (void *x)
 {
     if (!x) {
-        fprintf("Out of memory.");
+        fprintf(stderr,"Out of memory.");
         abort();
     }
     return x;
@@ -30,7 +42,7 @@ typedef enum err_t {
     err_NONE,
     err_EINVAL,
     err_MEM,
-} err_t
+} err_t;
 
 typedef struct part_conv_t {
     /* Size of input vector */
@@ -89,19 +101,19 @@ part_conv_init (part_conv_t *pc, size_t M, size_t N, size_t d)
                 pc->ir_parts[_d] = FFTW_MALLOC(pc->_parts_sz/2+1);
                 BRK_IF_NULL(pc->ir_parts[_d],me,_d=d);
                 pc->_ir_part_plans[_d] = fftw_plan_dft_r2c_1d(pc->_parts_sz,
-                                                              pc->ir_parts[_d],
+                                                              (double*)pc->ir_parts[_d],
                                                               pc->ir_parts[_d],
                                                               FFTW_ESTIMATE);
                 pc->tmp_bufs[_d] = FFTW_MALLOC(pc->_parts_sz/2+1);
+                BRK_IF_NULL(pc->tmp_bufs[_d],me,_d=d);
                 pc->_tmp_bufs_plans_fwd[_d] = fftw_plan_dft_r2c_1d(pc->_parts_sz,
-                                                              pc->tmp_bufs[_d],
+                                                              (double*)pc->tmp_bufs[_d],
                                                               pc->tmp_bufs[_d],
                                                               FFTW_ESTIMATE);
                 pc->_tmp_bufs_plans_bwd[_d] = fftw_plan_dft_c2r_1d(pc->_parts_sz,
                                                               pc->tmp_bufs[_d],
-                                                              pc->tmp_bufs[_d],
+                                                              (double*)pc->tmp_bufs[_d],
                                                               FFTW_ESTIMATE);
-                BRK_IF_NULL(pc->tmp_bufs[_d],_d=d);
 #endif  
             }
         } while (0);
@@ -125,7 +137,32 @@ part_conv_init (part_conv_t *pc, size_t M, size_t N, size_t d)
 #endif  
         return err_MEM;
     }
+    pc->M = M;
+    pc->N = N;
+    pc->d = d;
     return err_NONE;
+}
+
+void part_conv_destroy(part_conv_t *pc)
+{
+    size_t d;
+    for (d = 0; d < pc->d; d++) {
+#ifdef FFT_LIB_FFTW 
+        fftw_destroy_plan(pc->_ir_part_plans[d]);
+        FFTW_FREE_(pc->ir_parts[d]);
+        fftw_destroy_plan(pc->_tmp_bufs_plans_fwd[d]);
+        fftw_destroy_plan(pc->_tmp_bufs_plans_bwd[d]);
+        FFTW_FREE_(pc->tmp_bufs[d]);
+#endif  
+    }
+    FREE_(pc->ir_parts);
+    FREE_(pc->tmp_bufs);
+#ifdef FFT_LIB_FFTW 
+    FREE_(pc->_ir_part_plans);
+    FREE_(pc->_tmp_bufs_plans_fwd);
+    FREE_(pc->_tmp_bufs_plans_bwd);
+#endif  
+    memset(pc,0,sizeof(part_conv_t));
 }
 
 void
@@ -135,7 +172,13 @@ part_conv_set_ir (part_conv_t *pc, f64_t *ir)
     for (_d = 0; _d < pc->d; _d++) {
 #ifdef FFT_LIB_FFTW
         memset(pc->ir_parts[_d],0,(pc->_parts_sz/2+1)*sizeof(fftw_complex));
-        memcpy(pc->ir_parts[_d],&ir[_d*pc->N/pc->d],pc->N/pc->d);
+        memcpy(pc->ir_parts[_d],&ir[_d*pc->N/pc->d],pc->N/pc->d*sizeof(f64_t));
+        /* divide by logical size N^2 because inverse tranform doesn't for both
+         * IR transform and input transform */
+        size_t n;
+        for (n = 0; n < pc->N/pc->d; n++) {
+            ((f64_t*)pc->ir_parts[_d])[n] /= (pc->_parts_sz*pc->_parts_sz);
+        }
         fftw_execute(pc->_ir_part_plans[_d]);
 #endif  
     }
@@ -150,27 +193,114 @@ part_conv_do_conv (part_conv_t *pc, f64_t *x)
     for (d = 0; d < pc->d; d++) {
         /* Do convolution of each part by multiplying in frequency domain */
 #ifdef FFT_LIB_FFTW
-        memset(pc->tmp_bufs[_d],0,(pc->_parts_sz/2+1)*sizeof(fftw_complex));
-        memcpy(pc->tmp_bufs[_d],&ir[_d*pc->N/pc->d],pc->N/pc->d);
+        memset(pc->tmp_bufs[d],0,(pc->_parts_sz/2+1)*sizeof(fftw_complex));
+        memcpy(pc->tmp_bufs[d],&x[d*pc->N/pc->d],pc->N/pc->d*sizeof(f64_t));
         fftw_execute(pc->_tmp_bufs_plans_fwd[d]);
         size_t n;
         for (n = 0; n < (pc->_parts_sz/2+1); n++) {
-            pc->tmp_bufs[d] *= pc->ir_parts[d];
+            pc->tmp_bufs[d][n] *= pc->ir_parts[d][n];
         }
         fftw_execute(pc->_tmp_bufs_plans_bwd[d]);
 #endif  
     }
     /* Sum in all bufs */
     memset(x,0,sizeof(f64_t)*(pc->M+pc->N-1));
+    size_t n;
     for (d = 0; d < (pc->d - 1); d++) {
-        size_t n;
-        for (n = 0; n < (pc->M + pc->N/pd->d - 1); n++) {
-            x[n] += pc->tmp_bufs[d][n];
+        for (n = 0; n < (pc->M + pc->N/pc->d - 1); n++) {
+            x[n] += ((f64_t*)pc->tmp_bufs[d])[n];
         }
         x += pc->N/pc->d;
     }
     /* Last buf might be shorter */
-    for (n = 0; n < (pc->M + pc->N - 1 - pc->N/pc->d*(d-1)); n++) {
-        x[n] += pc->tmp_bufs[pc->d - 1][n];
+    for (n = 0; n < (pc->M + pc->N - 1 - pc->N/pc->d*(pc->d-1)); n++) {
+        x[n] += ((f64_t*)pc->tmp_bufs[pc->d - 1])[n];
     }
 }
+
+#ifdef PART_CONV_TEST
+typedef struct param_set_t {
+    int M;
+    int N;
+    int d;
+    struct param_set_t *next;
+} param_set_t;
+
+/* Test to see algorithm is correct */
+void part_conv_correct_test(void)
+{
+    int M, N, d;
+    M = (random() % 256) + 1;
+    d = (int)pow(2.,(random() % 7) + 1);
+    N = d * ((random() % 1000) + 1);
+    f64_t *ir = CALLOC(f64_t,N);
+    f64_t *out1 = CALLOC(f64_t,M+N-1);
+    f64_t *out2 = CALLOC(f64_t,M+N-1);
+    size_t n;
+    for (n = 0; n < N; n++) {
+        ir[n] = RAND_C64();
+    }
+    for (n = 0; n < M; n++) {
+        out1[n] = out2[n] = RAND_C64();
+    }
+    part_conv_t pc;
+    assert(part_conv_init(&pc,M,N,d) != err_MEM);
+    part_conv_set_ir(&pc,ir);
+    part_conv_do_conv(&pc,out1);
+    part_conv_do_conv(&pc,out2);
+    for (n = 0; n < (N+M-1); n++) {
+        assert(abs(out1[n]-out2[n]) < 1e-6);
+    }
+    part_conv_destroy(&pc);
+    free(ir);
+    free(out1);
+    free(out2);
+}
+
+int
+main (void) {
+    srandom(time(NULL));
+    part_conv_correct_test();
+    int M, N, d;
+    param_set_t *ps = NULL;
+    while (fscanf(stdin,"%d %d %d\n",&M,&N,&d) == 3) {
+        param_set_t *tmp = CALLOC(param_set_t,1);
+        tmp->M = M;
+        tmp->N = N;
+        tmp->d = d;
+        tmp->next = ps;
+        ps = tmp;
+    }
+    param_set_t *tmp = ps;
+    while (tmp) {
+        /* build and do convolution */
+        part_conv_t pc;
+        assert(part_conv_init(&pc,tmp->M,tmp->N,tmp->d) != err_MEM);
+        f64_t *tmp_buf = CALLOC(f64_t,tmp->M+tmp->N-1);
+        f64_t *tmp_ir  = CALLOC(f64_t,tmp->N);
+        size_t n;
+        for (n = 0; n < tmp->M; n++) {
+            tmp_buf[n] = RAND_C64();
+        }
+        for (n = 0; n < tmp->N; n++) {
+            tmp_ir[n] = RAND_C64();
+        }
+        part_conv_set_ir(&pc,tmp_ir);
+        /* start profiling */
+        CALLGRIND_START_INSTRUMENTATION;
+        part_conv_do_conv(&pc,tmp_buf);
+        CALLGRIND_STOP_INSTRUMENTATION;
+        CALLGRIND_DUMP_STATS;
+        part_conv_destroy(&pc);
+        free(tmp_buf);
+        free(tmp_ir);
+        param_set_t *next = tmp->next;
+        free(tmp);
+        tmp = next;
+    }
+    return 0;
+}
+#endif  
+
+
+
