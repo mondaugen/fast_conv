@@ -219,12 +219,12 @@ part_conv_do_conv (part_conv_t *pc, f64_t *x)
 }
 
 #ifdef PART_CONV_TEST
-typedef struct param_set_t {
-    int M;
-    int N;
-    int d;
-    struct param_set_t *next;
-} param_set_t;
+//typedef struct param_set_t {
+//    int M;
+//    int N;
+//    int d;
+//    struct param_set_t *next;
+//} param_set_t;
 
 /* Test to see algorithm is correct */
 void part_conv_correct_test(void)
@@ -257,46 +257,38 @@ void part_conv_correct_test(void)
     free(out2);
 }
 
+#define N_CONVS 1 
+
 int
 main (void) {
     srandom(time(NULL));
     part_conv_correct_test();
     int M, N, d;
-    param_set_t *ps = NULL;
     while (fscanf(stdin,"%d %d %d\n",&M,&N,&d) == 3) {
-        param_set_t *tmp = CALLOC(param_set_t,1);
-        tmp->M = M;
-        tmp->N = N;
-        tmp->d = d;
-        tmp->next = ps;
-        ps = tmp;
-    }
-    param_set_t *tmp = ps;
-    while (tmp) {
+        fprintf(stderr,"M=%d N=%d d=%d\n",M,N,d);
         /* build and do convolution */
         part_conv_t pc;
-        assert(part_conv_init(&pc,tmp->M,tmp->N,tmp->d) != err_MEM);
-        f64_t *tmp_buf = CALLOC(f64_t,tmp->M+tmp->N-1);
-        f64_t *tmp_ir  = CALLOC(f64_t,tmp->N);
+        assert(part_conv_init(&pc,M,N,d) != err_MEM);
+        f64_t *tmp_buf = CALLOC(f64_t,M+N-1);
+        f64_t *tmp_ir  = CALLOC(f64_t,N);
         size_t n;
-        for (n = 0; n < tmp->M; n++) {
+        for (n = 0; n < M; n++) {
             tmp_buf[n] = RAND_C64();
         }
-        for (n = 0; n < tmp->N; n++) {
+        for (n = 0; n < N; n++) {
             tmp_ir[n] = RAND_C64();
         }
         part_conv_set_ir(&pc,tmp_ir);
         /* start profiling */
         CALLGRIND_START_INSTRUMENTATION;
-        part_conv_do_conv(&pc,tmp_buf);
+        for (n = 0; n < N_CONVS; n++) {
+            part_conv_do_conv(&pc,tmp_buf);
+        }
         CALLGRIND_STOP_INSTRUMENTATION;
         CALLGRIND_DUMP_STATS;
         part_conv_destroy(&pc);
         free(tmp_buf);
         free(tmp_ir);
-        param_set_t *next = tmp->next;
-        free(tmp);
-        tmp = next;
     }
     return 0;
 }
