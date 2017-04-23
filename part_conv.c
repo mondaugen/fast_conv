@@ -243,15 +243,18 @@ void part_conv_correct_test(void)
     for (n = 0; n < M; n++) {
         out1[n] = out2[n] = RAND_C64();
     }
-    part_conv_t pc;
-    assert(part_conv_init(&pc,M,N,d) != err_MEM);
-    part_conv_set_ir(&pc,ir);
-    part_conv_do_conv(&pc,out1);
-    part_conv_do_conv(&pc,out2);
+    part_conv_t pc1, pc2;
+    assert(part_conv_init(&pc1,M,N,d) != err_MEM);
+    assert(part_conv_init(&pc2,M,N,1) != err_MEM);
+    part_conv_set_ir(&pc1,ir);
+    part_conv_set_ir(&pc2,ir);
+    part_conv_do_conv(&pc1,out1);
+    part_conv_do_conv(&pc2,out2);
     for (n = 0; n < (N+M-1); n++) {
         assert(abs(out1[n]-out2[n]) < 1e-6);
     }
-    part_conv_destroy(&pc);
+    part_conv_destroy(&pc1);
+    part_conv_destroy(&pc2);
     free(ir);
     free(out1);
     free(out2);
